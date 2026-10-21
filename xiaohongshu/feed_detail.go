@@ -108,9 +108,10 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	// 使用retry-go处理页面导航和DOM稳定等待
 	err := retry.Do(
 		func() error {
-			page.MustNavigate(url)
-			waitFeedPageReady(page)
-			return nil
+			if err := page.Navigate(url); err != nil {
+				return fmt.Errorf("打开详情页失败: %w", err)
+			}
+			return waitFeedPageReady(page)
 		},
 		retry.Attempts(3),
 		retry.Delay(500*time.Millisecond),

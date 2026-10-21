@@ -115,9 +115,48 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	page := s.page.Context(ctx).Timeout(60 * time.Second)
 
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+
+	// 这里刻意不用 MustNavigate / MustWaitStable / MustWait：
+	// 三个 Must* 在失败时 panic，而 panic 信息只有 "context deadline exceeded"，
+	// 不指向任何真实原因（实测：未登录时会卡满 60s 再 panic 在 rod/must.go）。
+	// 换成返回 error 的版本，并在等待中监视登录墙。
+	// 导航单独给 20s 上限：安全验证页可能永远不触发 load 完成，
+	// 用 page 自带的 60s deadline 会把「立刻就能诊断出来的验证码」
+	// 拖成 60 秒的等待。
+	tNav := time.Now()
+	if err := page.Timeout(20 * time.Second).Navigate(searchURL); err != nil {
+		logrus.Infof("[timing] Navigate 失败 耗时=%s err=%v", time.Since(tNav), err)
+		if p := LoginProblem(page); p != nil {
+			return nil, fmt.Errorf("%w（%s）", p, Snapshot(page).Describe())
+		}
+		logrus.Warnf("搜索页导航未在 20s 内完成（%v），继续等待页面就绪并诊断", err)
+	} else {
+		logrus.Infof("[timing] Navigate 完成 耗时=%s", time.Since(tNav))
+	}
+
+	// 先诊断，再等稳定。
+	//
+	// 顺序很关键：WaitStable 的定义是"页面静止满 d 秒"，而安全验证页
+	// 一直有动画与轮询请求，永远不会静止——实测它在验证码页上
+	// 撞满 page 的 60s deadline（59.358s），把本来 2ms 就能识别的原因
+	// 拖成一分钟。先做一次廉价诊断，命中就直接返回。
+	if p := LoginProblem(page); p != nil {
+		return nil, fmt.Errorf("%w（%s）", p, Snapshot(page).Describe())
+	}
+
+	tStable := time.Now()
+	// 同样给 WaitStable 自己的上限：它不致命，等不到就算了。
+	if err := page.Timeout(5 * time.Second).WaitStable(800 * time.Millisecond); err != nil {
+		logrus.Debugf("等待搜索页稳定未完成（不致命，继续）: %v", err)
+	}
+	logrus.Infof("[timing] WaitStable 耗时=%s", time.Since(tStable))
+
+	tReady := time.Now()
+	if err := WaitSearchReady(page, 60*time.Second); err != nil {
+		logrus.Infof("[timing] WaitSearchReady 耗时=%s（提前命中诊断）", time.Since(tReady))
+		return nil, err
+	}
+	logrus.Infof("[timing] WaitSearchReady 耗时=%s", time.Since(tReady))
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	// 登录墙检查。

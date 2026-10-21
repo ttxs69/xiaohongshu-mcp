@@ -56,6 +56,30 @@ func TestSnapshotProblem(t *testing.T) {
 			want: xhserrors.ErrAccountAbnormal,
 		},
 		{
+			name: "安全验证页必须被识别（实测踩过的坑）",
+			snap: PageSnapshot{
+				URL:   "https://www.xiaohongshu.com/website-login/captcha?verifyType=124&verifyBiz=461",
+				Title: "安全验证",
+			},
+			want: xhserrors.ErrCaptchaRequired,
+		},
+		{
+			name: "标题含安全验证也算",
+			snap: PageSnapshot{
+				URL:   "https://www.xiaohongshu.com/unknown",
+				Title: "安全验证",
+			},
+			want: xhserrors.ErrCaptchaRequired,
+		},
+		{
+			name: "验证码优先级高于未登录（它更具体）",
+			snap: PageSnapshot{
+				URL:        "https://www.xiaohongshu.com/website-login/captcha",
+				HasLoginUI: true,
+			},
+			want: xhserrors.ErrCaptchaRequired,
+		},
+		{
 			name: "登录页优先于账号异常被识别（先重登再判断）",
 			snap: PageSnapshot{
 				URL:     "https://www.xiaohongshu.com/login",

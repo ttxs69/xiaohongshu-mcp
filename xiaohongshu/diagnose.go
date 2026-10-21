@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-rod/rod"
 
@@ -29,6 +30,10 @@ type PageSnapshot struct {
 	RawMsg        string `json:"raw_msg,omitempty"`
 }
 
+// diagEvalTimeout 是诊断类 Eval 的上限。
+// 诊断必须"廉价且快"，否则它会变成新的阻塞源。
+const diagEvalTimeout = 1500 * time.Millisecond
+
 const snapshotJS = `() => {
 	const s = window.__INITIAL_STATE__;
 	const q = sel => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
@@ -46,9 +51,14 @@ const snapshotJS = `() => {
 }`
 
 // Snapshot 读取页面当前状态。取不到也不报错——诊断信息本身不该再制造失败。
+//
+// 关键：必须用短超时。page 通常带着 60s 的 deadline，
+// 直接 page.Eval 在页面忙/导航中会阻塞到那个 deadline，
+// 结果是「诊断轮询」每 60 秒才转一圈，等于没有轮询。
+// 实测（2026-10-21）：不加短超时时，安全验证页要 61 秒才被识别出来。
 func Snapshot(page *rod.Page) PageSnapshot {
 	var snap PageSnapshot
-	res, err := page.Eval(snapshotJS)
+	res, err := page.Timeout(diagEvalTimeout).Eval(snapshotJS)
 	if err != nil {
 		if info, ierr := page.Info(); ierr == nil {
 			snap.URL = info.URL
@@ -70,6 +80,17 @@ func LoginProblem(page *rod.Page) error {
 
 func snapshotProblem(snap PageSnapshot) error {
 	lower := strings.ToLower(snap.URL)
+
+	// 验证码 / 安全验证要排在最前面：这类页面 URL 里带 website-login 和 captcha，
+	// 标题是「安全验证」，既没有登录 UI 也没有 300011，
+	// 会被下游误判成"已登录但没数据"，实际上是需要人工点一次验证。
+	if strings.Contains(lower, "captcha") ||
+		strings.Contains(lower, "verify") ||
+		strings.Contains(snap.Title, "安全验证") ||
+		strings.Contains(snap.Title, "验证码") {
+		return errors.ErrCaptchaRequired
+	}
+
 	if strings.Contains(lower, "/login") {
 		return errors.ErrNotLoggedIn
 	}
@@ -86,6 +107,8 @@ func snapshotProblem(snap PageSnapshot) error {
 func (s PageSnapshot) Describe() string {
 	state := "已登录"
 	switch {
+	case snapshotProblem(s) == errors.ErrCaptchaRequired:
+		state = "要求安全验证"
 	case snapshotProblem(s) == errors.ErrAccountAbnormal:
 		state = "账号异常"
 	case snapshotProblem(s) == errors.ErrNotLoggedIn:
@@ -105,4 +128,38 @@ func EmptyResultError(page *rod.Page, base error) error {
 		return fmt.Errorf("%w（%s）", p, snap.Describe())
 	}
 	return fmt.Errorf("%w（%s）", base, snap.Describe())
+}
+
+// WaitSearchReady 等待搜索页就绪，但**同时监视登录墙**。
+//
+// 为什么不能用 page.MustWait：
+//
+//	MustWait(`() => window.__INITIAL_STATE__ !== undefined`) 在未登录时
+//	永远等不到条件成立（页面停在登录墙，不注入搜索状态），
+//	于是一直等到 page 的 deadline 后 panic，对外表现成
+//	"context deadline exceeded" —— 一个不指向任何真实原因的错误。
+//
+// 实测（2026-10-21）：账号 cookie 失效 + 平台返回 300011 时，
+//
+//	该 MustWait 卡满 60 秒后 panic，栈顶为 rod/must.go:502。
+//
+// 本函数每 500ms 检查一次登录墙，命中就立刻返回具体原因；
+// 只有在既没就绪、也没有登录问题时才继续等。
+func WaitSearchReady(page *rod.Page, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ready, err := page.Timeout(diagEvalTimeout).Eval(
+			`() => (window.__INITIAL_STATE__ !== undefined) ? 1 : 0`); err == nil {
+			// rod 的 Value.Int() 只返回 int（非数值时为 0），没有 ok 返回值
+			if ready.Value.Int() == 1 {
+				return nil
+			}
+		}
+		if p := LoginProblem(page); p != nil {
+			return fmt.Errorf("%w（%s）", p, Snapshot(page).Describe())
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("等待搜索页就绪超时（%s），且未发现登录问题——可能是平台改版或网络问题（%s）",
+		timeout, Snapshot(page).Describe())
 }
