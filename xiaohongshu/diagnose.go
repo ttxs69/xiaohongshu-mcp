@@ -81,21 +81,43 @@ func LoginProblem(page *rod.Page) error {
 func snapshotProblem(snap PageSnapshot) error {
 	lower := strings.ToLower(snap.URL)
 
-	// 验证码 / 安全验证要排在最前面：这类页面 URL 里带 website-login 和 captcha，
-	// 标题是「安全验证」，既没有登录 UI 也没有 300011，
-	// 会被下游误判成"已登录但没数据"，实际上是需要人工点一次验证。
-	if strings.Contains(lower, "captcha") ||
-		strings.Contains(lower, "verify") ||
-		strings.Contains(snap.Title, "安全验证") ||
-		strings.Contains(snap.Title, "验证码") {
-		return errors.ErrCaptchaRequired
+	// 判定顺序很重要，且不能只看 URL 关键词。
+	//
+	// 实测踩过的坑（2026-10-21）：
+	//   笔记被拦截时 URL 是
+	//     /404?source=/404/sec_alaRUWwP?...&error_code=300031&error_msg=当前笔记暂时无法浏览
+	//   其中 redirectPath 里含 "verifyMsg"、路径含 "sec_"，很容易被
+	//   「URL 含 captcha/verify」这种粗判误认成验证码。
+	//   而它其实是**笔记被拦截**，两者处置完全不同：
+	//   验证码要人工过；笔记被拦截只能换一条笔记。
+
+	// 1) 笔记被拦截：URL 里带 error_code=300031 或 source=/404/sec_
+	if strings.Contains(lower, "error_code=300031") ||
+		strings.Contains(lower, "/404/sec_") {
+		return errors.ErrNoteBlocked
 	}
 
+	// 2) 登录墙：先于账号风控判定。
+	//    实测 cookie 失效时平台可能同时给 300011，
+	//    正确动作是**先重新登录**，重登后仍 300011 才是真的被风控。
+	//    反过来（先认定风控去换号）可能白换一个号。
 	if strings.Contains(lower, "/login") {
 		return errors.ErrNotLoggedIn
 	}
+
+	// 3) 平台明确的风控码
 	if snap.RawCode == "300011" || strings.Contains(strings.ToLower(snap.RawMsg), "account abnormal") {
 		return errors.ErrAccountAbnormal
+	}
+
+	// 4) 验证码 / 安全验证：路径里真的出现 captcha 段，或标题就是「安全验证」。
+	//    只看 path 段与标题，不拿整串 query 做 includes——
+	//    redirectPath 里出现 "verifyMsg" 并不代表当前页是验证码页。
+	if strings.Contains(lower, "/website-login/captcha") ||
+		strings.Contains(lower, "/captcha?") ||
+		strings.Contains(snap.Title, "安全验证") ||
+		strings.Contains(snap.Title, "验证码") {
+		return errors.ErrCaptchaRequired
 	}
 	if snap.HasLoginUI {
 		return errors.ErrNotLoggedIn
@@ -107,6 +129,8 @@ func snapshotProblem(snap PageSnapshot) error {
 func (s PageSnapshot) Describe() string {
 	state := "已登录"
 	switch {
+	case snapshotProblem(s) == errors.ErrNoteBlocked:
+		state = "笔记被拦截"
 	case snapshotProblem(s) == errors.ErrCaptchaRequired:
 		state = "要求安全验证"
 	case snapshotProblem(s) == errors.ErrAccountAbnormal:

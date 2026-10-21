@@ -56,6 +56,16 @@ func TestSnapshotProblem(t *testing.T) {
 			want: xhserrors.ErrAccountAbnormal,
 		},
 		{
+			name: "笔记被拦截（300031）不能被误判成验证码",
+			snap: PageSnapshot{
+				URL: "https://www.xiaohongshu.com/404?source=/404/sec_alaRUWwP?redirectPath=" +
+					"https%3A%2F%2Fwww.xiaohongshu.com%2Fexplore%2Fabc%3Fxsec_token%3Dxyz" +
+					"&error_code=300031&error_msg=%E5%BD%93%E5%89%8D%E7%AC%94%E8%AE%B0%E6%9A%82%E6%97%B6%E6%97%A0%E6%B3%95%E6%B5%8F%E8%A7%88&uuid=x&verifyMsg=",
+				Title: "小红书 - 你访问的页面不见了",
+			},
+			want: xhserrors.ErrNoteBlocked,
+		},
+		{
 			name: "安全验证页必须被识别（实测踩过的坑）",
 			snap: PageSnapshot{
 				URL:   "https://www.xiaohongshu.com/website-login/captcha?verifyType=124&verifyBiz=461",
