@@ -120,6 +120,17 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
+	// 登录墙检查。
+	//
+	// 未登录 / cookie 失效时，上面几句全都会"成功"——页面确实加载了，
+	// __INITIAL_STATE__ 也确实存在——但 search.feeds 节点不存在。
+	// 原实现一直到函数末尾才发现 result 为空，然后把三种完全不同的情况
+	// 一起报成「没有捕获到 feeds 数据」。
+	// 这里提前判，让「需要重新登录」能被明确说出来。
+	if err := LoginProblem(page); err != nil {
+		return nil, err
+	}
+
 	if len(pending) > 0 {
 		// 悬停在筛选按钮上展开面板
 		filterButton := page.MustElement(`div.filter`)
@@ -177,7 +188,9 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	}`).String()
 
 	if result == "" {
-		return nil, errors.ErrNoFeeds
+		// 空结果必须带现场信息：否则「未登录」「账号风控」「真的没结果」
+		// 三种情况无法区分，使用者只能盲目重试。
+		return nil, EmptyResultError(page, errors.ErrNoFeeds)
 	}
 
 	var feeds []Feed

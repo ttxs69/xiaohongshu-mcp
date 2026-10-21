@@ -129,6 +129,16 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 		return nil, err
 	}
 
+	// 登录墙检查。
+	//
+	// checkPageAccessible 只覆盖「笔记被删 / 私密 / 违规」这几类，
+	// 未登录时它会走到 "未找到错误容器 ⇒ 页面可访问" 直接放行，
+	// 然后 extractFeedDetail 取不到数据，最终报「没有捕获到 feed 详情数据」。
+	// 这里把「需要重新登录」单独判出来。
+	if err := LoginProblem(page); err != nil {
+		return nil, err
+	}
+
 	if loadAllComments {
 		if err := f.loadAllCommentsWithConfig(ctx, page, config); err != nil {
 			logrus.Warnf("加载全部评论失败: %v", err)
@@ -977,7 +987,7 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 	}
 
 	if result == "" {
-		return nil, errors.ErrNoFeedDetail
+		return nil, EmptyResultError(page, errors.ErrNoFeedDetail)
 	}
 
 	var noteDetailMap map[string]struct {
